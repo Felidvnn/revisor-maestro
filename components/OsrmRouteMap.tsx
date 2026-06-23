@@ -14,6 +14,10 @@ export type RouteMetric = {
   centroidMinutes: number | null;
   centroidKm: number | null;
   centroidPath: Array<[number, number]>;
+  tripMinutes: number | null;
+  tripKm: number | null;
+  tripPath: Array<[number, number]>;
+  visitOrder: Array<{ clientId: string; order: number }>;
 };
 
 type OsrmRouteMapProps = {
@@ -46,6 +50,13 @@ export default function OsrmRouteMap({
   fitEnabled
 }: OsrmRouteMapProps) {
   const selectedZoneSet = useMemo(() => new Set(selectedZoneIds), [selectedZoneIds]);
+  const visitOrderByClient = useMemo(() => {
+    const order = new Map<string, number>();
+    for (const metric of metrics) {
+      for (const visit of metric.visitOrder) order.set(visit.clientId, visit.order);
+    }
+    return order;
+  }, [metrics]);
   const locatedClients = useMemo(
     () => clients.filter((client) => typeof client.lat === "number" && typeof client.lng === "number"),
     [clients]
@@ -91,6 +102,8 @@ export default function OsrmRouteMap({
                   <div>Min prom.: {formatMetric(metric?.avgMinutes ?? null, "min")}</div>
                   <div>Km centroide: {formatMetric(metric?.centroidKm ?? null, "km")}</div>
                   <div>Min centroide: {formatMetric(metric?.centroidMinutes ?? null, "min")}</div>
+                  <div>Km viaje KNN: {formatMetric(metric?.tripKm ?? null, "km")}</div>
+                  <div>Min viaje KNN: {formatMetric(metric?.tripMinutes ?? null, "min")}</div>
                   <button className="mt-2 text-xs font-semibold text-teal-700" type="button">
                     {selected ? "Seleccionado" : "Click para seleccionar"}
                   </button>
@@ -101,6 +114,17 @@ export default function OsrmRouteMap({
         })}
       </Pane>
       <Pane name="osrm-routes" style={{ zIndex: 560 }}>
+        {metrics.map((metric, index) =>
+          metric.tripPath.length ? (
+            <Polyline
+              key={`${metric.zoneId}-trip`}
+              pane="osrm-routes"
+              positions={metric.tripPath}
+              bubblingMouseEvents={false}
+              pathOptions={{ color: "#111827", opacity: 0.82, weight: 4 }}
+            />
+          ) : null
+        )}
         {metrics.map((metric, index) =>
           metric.centroidPath.length ? (
             <Polyline
@@ -114,31 +138,52 @@ export default function OsrmRouteMap({
         )}
       </Pane>
       <Pane name="osrm-clients" style={{ zIndex: 620 }}>
-        {showClients && locatedClients.map((client) => (
-          <CircleMarker
-            key={`${client.id}-${client.lat}-${client.lng}`}
-            pane="osrm-clients"
-            center={[client.lat as number, client.lng as number]}
-            radius={3.8}
-            bubblingMouseEvents={false}
-            pathOptions={{
-              color: "#ffffff",
-              fillColor: "#0f766e",
-              fillOpacity: 0.82,
-              opacity: 1,
-              weight: 1.2
-            }}
-          >
-            <Popup pane="popupPane">
-              <div className="min-w-52 space-y-1 text-sm">
-                <strong>{client.name}</strong>
-                <div>{client.address}</div>
-                <div>Zona maestro: {client.zoneCode}</div>
-                <div>Tipo: {client.customerType || "Sin tipo"}</div>
-              </div>
-            </Popup>
-          </CircleMarker>
-        ))}
+        {showClients && locatedClients.map((client) => {
+          const order = visitOrderByClient.get(client.id);
+          if (order) {
+            return (
+              <Marker
+                key={`${client.id}-${client.lat}-${client.lng}`}
+                position={[client.lat as number, client.lng as number]}
+                icon={visitIcon(order)}
+              >
+                <Popup pane="popupPane">
+                  <div className="min-w-52 space-y-1 text-sm">
+                    <strong>{order}. {client.name}</strong>
+                    <div>{client.address}</div>
+                    <div>Zona maestro: {client.zoneCode}</div>
+                    <div>Tipo: {client.customerType || "Sin tipo"}</div>
+                  </div>
+                </Popup>
+              </Marker>
+            );
+          }
+          return (
+            <CircleMarker
+              key={`${client.id}-${client.lat}-${client.lng}`}
+              pane="osrm-clients"
+              center={[client.lat as number, client.lng as number]}
+              radius={3.8}
+              bubblingMouseEvents={false}
+              pathOptions={{
+                color: "#ffffff",
+                fillColor: "#0f766e",
+                fillOpacity: 0.82,
+                opacity: 1,
+                weight: 1.2
+              }}
+            >
+              <Popup pane="popupPane">
+                <div className="min-w-52 space-y-1 text-sm">
+                  <strong>{client.name}</strong>
+                  <div>{client.address}</div>
+                  <div>Zona maestro: {client.zoneCode}</div>
+                  <div>Tipo: {client.customerType || "Sin tipo"}</div>
+                </div>
+              </Popup>
+            </CircleMarker>
+          );
+        })}
         {origin && (
           <Marker position={origin} icon={originIcon()}>
             <Popup pane="popupPane">Punto de inicio</Popup>
@@ -219,6 +264,15 @@ function centroidIcon(): DivIcon {
   return L.divIcon({
     className: "osrm-marker osrm-marker-centroid",
     html: "C",
+    iconSize: [24, 24],
+    iconAnchor: [12, 12]
+  });
+}
+
+function visitIcon(order: number): DivIcon {
+  return L.divIcon({
+    className: "osrm-marker osrm-marker-visit",
+    html: String(order),
     iconSize: [24, 24],
     iconAnchor: [12, 12]
   });

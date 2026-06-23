@@ -75,3 +75,9 @@ body {
 .osrm-marker-centroid {
   background: #0f766e;
 }
+
+.osrm-marker-visit {
+  background: #dc2626;
+  font-size: 11px;
+  line-height: 1;
+}

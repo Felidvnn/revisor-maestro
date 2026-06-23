@@ -32,6 +32,7 @@ type ZoneRouteResult = RouteMetric & {
   zoneCode: string;
   clientCount: number;
   failedRoutes: number;
+  omittedTripClients: number;
 };
 
 type ProgressState = {
@@ -71,6 +72,7 @@ export default function RouteAnalysisApp() {
 
   const origin = useMemo(() => parseOrigin(originLat, originLng), [originLat, originLng]);
   const routeMetrics = useMemo<RouteMetric[]>(() => results.map(({ zoneName, zoneCode, clientCount, failedRoutes, ...metric }) => metric), [results]);
+  const processedZoneIds = useMemo(() => new Set(results.map((result) => result.zoneId)), [results]);
   const selectedClients = useMemo(() => {
     const byClient = new Map<string, ClientRecord>();
     for (const input of selectedInputs) {
@@ -112,7 +114,7 @@ export default function RouteAnalysisApp() {
     setError("");
     setRunning(true);
     setResults([]);
-    const totalRequests = selectedInputs.reduce((sum, item) => sum + item.clients.length + (item.centroid ? 1 : 0), 0);
+    const totalRequests = selectedInputs.reduce((sum, item) => sum + item.clients.length + (item.centroid ? 1 : 0) + item.clients.length + 1, 0);
     let done = 0;
     const nextResults: ZoneRouteResult[] = [];
 
@@ -139,6 +141,12 @@ export default function RouteAnalysisApp() {
           setProgress({ done, total: totalRequests, label: `${input.zone.name} - centroide` });
         }
 
+        setProgress({ done, total: totalRequests, label: `${input.zone.name} - viaje KNN` });
+        const trip = await buildKnnTrip(osrmBaseUrl, origin, input.clients, (label) => {
+          done += 1;
+          setProgress({ done, total: totalRequests, label });
+        }, input.zone.name);
+
         nextResults.push({
           zoneId: input.zone.id,
           zoneName: input.zone.name,
@@ -150,7 +158,12 @@ export default function RouteAnalysisApp() {
           centroidKm: centroidRoute?.km ?? null,
           centroidMinutes: centroidRoute?.minutes ?? null,
           centroidPath: centroidRoute?.path ?? [],
-          failedRoutes
+          tripKm: trip.km,
+          tripMinutes: trip.minutes,
+          tripPath: trip.path,
+          visitOrder: trip.visitOrder,
+          failedRoutes: failedRoutes + trip.failedLegs,
+          omittedTripClients: trip.omittedClients
         });
         setResults([...nextResults]);
       }
@@ -266,7 +279,14 @@ export default function RouteAnalysisApp() {
                   <button className="text-xs font-semibold text-teal-700" onClick={() => setSelectedZoneIds(zones.map((zone) => zone.id))}>
                     Todos
                   </button>
-                  <button className="text-xs font-semibold text-slate-500" onClick={() => setSelectedZoneIds([])}>
+                  <button
+                    className="text-xs font-semibold text-slate-500"
+                    onClick={() => {
+                      setSelectedZoneIds([]);
+                      setResults([]);
+                      setProgress({ done: 0, total: 0, label: "" });
+                    }}
+                  >
                     Limpiar
                   </button>
                 </div>
@@ -274,13 +294,16 @@ export default function RouteAnalysisApp() {
               <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
                 {zones.map((zone) => {
                   const checked = selectedZoneIds.includes(zone.id);
+                  const processed = processedZoneIds.has(zone.id);
                   const count = clientsInsideZone(clients, zone).length;
                   return (
                     <label key={zone.id} className="flex cursor-pointer items-start gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
                       <input
                         type="checkbox"
                         checked={checked}
+                        disabled={processed}
                         onChange={() =>
+                          !processed &&
                           setSelectedZoneIds((current) =>
                             current.includes(zone.id) ? current.filter((item) => item !== zone.id) : [...current, zone.id]
                           )
@@ -289,7 +312,9 @@ export default function RouteAnalysisApp() {
                       />
                       <span className="min-w-0">
                         <span className="block truncate font-semibold">{zone.name}</span>
-                        <span className="text-xs text-slate-500">{count.toLocaleString("es-CL")} clientes dentro</span>
+                        <span className="text-xs text-slate-500">
+                          {count.toLocaleString("es-CL")} clientes dentro{processed ? " - procesado" : ""}
+                        </span>
                       </span>
                     </label>
                   );
@@ -341,6 +366,7 @@ export default function RouteAnalysisApp() {
   );
 
   function toggleZone(zoneId: string) {
+    if (processedZoneIds.has(zoneId) && selectedZoneIds.includes(zoneId)) return;
     setSelectedZoneIds((current) => (current.includes(zoneId) ? current.filter((item) => item !== zoneId) : [...current, zoneId]));
   }
 }
@@ -443,7 +469,7 @@ function ResultsTable({ results }: { results: ZoneRouteResult[] }) {
     <section className="rounded-lg border border-slate-200 bg-white shadow-panel">
       <div className="border-b border-slate-200 px-4 py-3">
         <h2 className="text-base font-semibold">Resultado por poligono</h2>
-        <p className="text-sm text-slate-500">Promedio a clientes y ruta al centroide de clientes dentro del KML.</p>
+        <p className="text-sm text-slate-500">Promedio a clientes, ruta al centroide y viaje completo KNN desde y hacia la sucursal.</p>
       </div>
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -455,6 +481,9 @@ function ResultsTable({ results }: { results: ZoneRouteResult[] }) {
               <th className="px-4 py-3">Min prom.</th>
               <th className="px-4 py-3">Km centroide</th>
               <th className="px-4 py-3">Min centroide</th>
+              <th className="px-4 py-3">Km viaje KNN</th>
+              <th className="px-4 py-3">Min viaje KNN</th>
+              <th className="px-4 py-3">Omitidos viaje</th>
               <th className="px-4 py-3">Fallidas</th>
             </tr>
           </thead>
@@ -467,6 +496,9 @@ function ResultsTable({ results }: { results: ZoneRouteResult[] }) {
                 <td className="px-4 py-3">{formatMetric(result.avgMinutes, "min")}</td>
                 <td className="px-4 py-3">{formatMetric(result.centroidKm, "km")}</td>
                 <td className="px-4 py-3">{formatMetric(result.centroidMinutes, "min")}</td>
+                <td className="px-4 py-3">{formatMetric(result.tripKm, "km")}</td>
+                <td className="px-4 py-3">{formatMetric(result.tripMinutes, "min")}</td>
+                <td className="px-4 py-3">{result.omittedTripClients.toLocaleString("es-CL")}</td>
                 <td className="px-4 py-3">{result.failedRoutes.toLocaleString("es-CL")}</td>
               </tr>
             ))}
@@ -493,6 +525,106 @@ async function fetchRoute(baseUrl: string, origin: [number, number], destination
       ? route.geometry.coordinates.map(([lng, lat]: [number, number]) => [lat, lng] as [number, number])
       : []
   };
+}
+
+async function buildKnnTrip(
+  baseUrl: string,
+  origin: [number, number],
+  clients: ClientRecord[],
+  onProgress: (label: string) => void,
+  zoneName: string
+) {
+  const remaining = clients
+    .filter((client) => typeof client.lat === "number" && typeof client.lng === "number")
+    .map((client) => ({
+      client,
+      point: [client.lat as number, client.lng as number] as [number, number]
+    }));
+  const visitOrder: Array<{ clientId: string; order: number }> = [];
+  const path: Array<[number, number]> = [];
+  let current = origin;
+  let km = 0;
+  let minutes = 0;
+  let failedLegs = 0;
+  let omittedClients = 0;
+
+  while (remaining.length) {
+    const nextIndex = nearestIndex(current, remaining.map((item) => item.point));
+    const [next] = remaining.splice(nextIndex, 1);
+    onProgress(`${zoneName} - viaje KNN ${next.client.name}`);
+    const route = await fetchRoute(baseUrl, current, next.point, true);
+
+    if (!route) {
+      failedLegs += 1;
+      omittedClients += 1;
+      continue;
+    }
+
+    km += route.km;
+    minutes += route.minutes;
+    appendPath(path, route.path);
+    visitOrder.push({ clientId: next.client.id, order: visitOrder.length + 1 });
+    current = next.point;
+  }
+
+  if (visitOrder.length) {
+    onProgress(`${zoneName} - regreso a sucursal`);
+    const returnRoute = await fetchRoute(baseUrl, current, origin, true);
+    if (returnRoute) {
+      km += returnRoute.km;
+      minutes += returnRoute.minutes;
+      appendPath(path, returnRoute.path);
+    } else {
+      failedLegs += 1;
+    }
+  } else {
+    onProgress(`${zoneName} - sin clientes rutables`);
+  }
+
+  return {
+    km: visitOrder.length ? km : null,
+    minutes: visitOrder.length ? minutes : null,
+    path,
+    visitOrder,
+    failedLegs,
+    omittedClients
+  };
+}
+
+function nearestIndex(origin: [number, number], points: Array<[number, number]>) {
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  points.forEach((point, index) => {
+    const distance = haversineKm(origin, point);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+
+function haversineKm(a: [number, number], b: [number, number]) {
+  const earthKm = 6371;
+  const dLat = toRad(b[0] - a[0]);
+  const dLng = toRad(b[1] - a[1]);
+  const lat1 = toRad(a[0]);
+  const lat2 = toRad(b[0]);
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * earthKm * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function toRad(value: number) {
+  return (value * Math.PI) / 180;
+}
+
+function appendPath(target: Array<[number, number]>, path: Array<[number, number]>) {
+  for (const point of path) {
+    const last = target[target.length - 1];
+    if (!last || last[0] !== point[0] || last[1] !== point[1]) target.push(point);
+  }
 }
 
 function parseOrigin(lat: string, lng: string): [number, number] | null {
