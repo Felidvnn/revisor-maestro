@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import {
@@ -22,7 +23,8 @@ import {
   Target,
   TrendingUp,
   Unlock,
-  UploadCloud
+  UploadCloud,
+  Route
 } from "lucide-react";
 import clsx from "clsx";
 import {
@@ -180,6 +182,13 @@ export default function DashboardApp() {
             </p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
+            <Link
+              href="/rutas"
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-white px-4 text-sm font-semibold text-slate-800 ring-1 ring-slate-200 transition hover:bg-slate-50"
+            >
+              <Route className="h-4 w-4" />
+              Analisis OSRM
+            </Link>
             <button
               onClick={downloadReview}
               disabled={!filtered.length}

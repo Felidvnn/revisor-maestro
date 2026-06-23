@@ -32,6 +32,8 @@ body {
 .leaflet-container {
   background: #eef2f3;
   font: inherit;
+  height: 100%;
+  width: 100%;
 }
 
 .leaflet-popup-content-wrapper {
@@ -39,13 +41,37 @@ body {
 }
 
 .leaflet-popup-pane {
-  z-index: 900;
+  z-index: 1200 !important;
 }
 
 .leaflet-tooltip-pane {
-  z-index: 880;
+  z-index: 1100 !important;
 }
 
 .leaflet-popup {
   pointer-events: auto;
+}
+
+.leaflet-interactive:focus,
+.leaflet-container path:focus {
+  outline: none;
+}
+
+.osrm-marker {
+  display: grid;
+  place-items: center;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
+}
+
+.osrm-marker-origin {
+  background: #111827;
+}
+
+.osrm-marker-centroid {
+  background: #0f766e;
 }

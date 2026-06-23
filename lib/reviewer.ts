@@ -395,6 +395,35 @@ export function parseKml(kmlText: string): ZonePolygon[] {
     .filter(Boolean) as ZonePolygon[];
 }
 
+export function findZoneForPoint(lat: number, lng: number, zones: ZonePolygon[]) {
+  const indexedZones = zones.map((zone) => ({ zone, bounds: getZoneBounds(zone) }));
+  return findContainingZone(lat, lng, indexedZones);
+}
+
+export function clientsInsideZone(clients: ClientRecord[], zone: ZonePolygon) {
+  const bounds = getZoneBounds(zone);
+  return clients.filter((client) => {
+    if (typeof client.lat !== "number" || typeof client.lng !== "number") return false;
+    if (!bounds || !isPointInBounds(client.lat, client.lng, bounds)) return false;
+    return zone.rings.some((ring) => isPointInRing(client.lat as number, client.lng as number, ring));
+  });
+}
+
+export function centroidFromClients(clients: ClientRecord[], fallbackZone?: ZonePolygon): [number, number] | null {
+  const located = clients.filter((client) => typeof client.lat === "number" && typeof client.lng === "number");
+  if (located.length) {
+    const lat = located.reduce((sum, client) => sum + (client.lat as number), 0) / located.length;
+    const lng = located.reduce((sum, client) => sum + (client.lng as number), 0) / located.length;
+    return [lat, lng];
+  }
+  if (!fallbackZone) return null;
+  const points = fallbackZone.rings.flat();
+  if (!points.length) return null;
+  const lat = points.reduce((sum, point) => sum + point[0], 0) / points.length;
+  const lng = points.reduce((sum, point) => sum + point[1], 0) / points.length;
+  return [lat, lng];
+}
+
 export function daysToCode(days: DayKey[]) {
   return dayOrder.filter((day) => days.includes(day)).join("");
 }
