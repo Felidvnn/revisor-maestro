@@ -24,10 +24,12 @@ import {
   TrendingUp,
   Unlock,
   UploadCloud,
+  Table2,
   Route
 } from "lucide-react";
 import clsx from "clsx";
 import {
+  buildKmlWorkbook,
   buildReviewWorkbook,
   buildTemplateWorkbook,
   compareClients,
@@ -36,10 +38,12 @@ import {
   normalizeText,
   parseClients,
   parseExcelRows,
+  parseKmlFeatureInfo,
   parseKml,
   parseSchedules,
   type AnalysisMode,
   type ClientRecord,
+  type KmlFeatureInfo,
   type ReviewRecord,
   type ReviewStatus,
   type ZonePolygon,
@@ -79,9 +83,11 @@ export default function DashboardApp() {
   const [clients, setClients] = useState<ClientRecord[]>([]);
   const [schedules, setSchedules] = useState<ZoneSchedule[]>([]);
   const [zones, setZones] = useState<ZonePolygon[]>([]);
+  const [kmlFeatures, setKmlFeatures] = useState<KmlFeatureInfo[]>([]);
   const [files, setFiles] = useState<FileState>({});
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("geo");
   const [activeTab, setActiveTab] = useState<AppTab>("map");
+  const [showKmlPreview, setShowKmlPreview] = useState(false);
   const [showZones, setShowZones] = useState(true);
   const [lockMapView, setLockMapView] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("priority");
@@ -149,6 +155,7 @@ export default function DashboardApp() {
       setError("");
       const text = await file.text();
       setZones(parseKml(text));
+      setKmlFeatures(parseKmlFeatureInfo(text));
       setFiles((current) => ({ ...current, kml: file.name }));
     } catch {
       setError("No pude leer el KML. Revisa que el archivo tenga poligonos de zonas.");
@@ -168,6 +175,11 @@ export default function DashboardApp() {
     const workbook = buildReviewWorkbook(sortRecords(filtered, sortKey), analysisMode);
     const stamp = new Date().toISOString().slice(0, 10);
     downloadWorkbook(workbook, `consolidado_revisor_maestro_${analysisMode}_${stamp}.xlsx`);
+  }
+
+  function downloadKmlAnalysis() {
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadWorkbook(buildKmlWorkbook(kmlFeatures), `analisis_kml_${stamp}.xlsx`);
   }
 
   return (
@@ -230,6 +242,15 @@ export default function DashboardApp() {
             onFile={handleSchedule}
           />
         </section>
+
+        {kmlFeatures.length > 0 && (
+          <KmlAnalysisBox
+            features={kmlFeatures}
+            showPreview={showKmlPreview}
+            onTogglePreview={() => setShowKmlPreview((current) => !current)}
+            onExport={downloadKmlAnalysis}
+          />
+        )}
 
         {error && (
           <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -327,6 +348,109 @@ export default function DashboardApp() {
         )}
       </div>
     </main>
+  );
+}
+
+function KmlAnalysisBox({
+  features,
+  showPreview,
+  onTogglePreview,
+  onExport
+}: {
+  features: KmlFeatureInfo[];
+  showPreview: boolean;
+  onTogglePreview: () => void;
+  onExport: () => void;
+}) {
+  const attributeKeys = Array.from(new Set(features.flatMap((feature) => Object.keys(feature.attributes)))).sort((a, b) =>
+    a.localeCompare(b, "es")
+  );
+  const totalPoints = features.reduce((sum, feature) => sum + feature.pointCount, 0);
+  const totalArea = features.reduce((sum, feature) => sum + (feature.areaKm2 ?? 0), 0);
+  const previewRows = features.slice(0, 60);
+  const previewAttributes = attributeKeys.slice(0, 6);
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+            <Table2 className="h-4 w-4" />
+            Analisis KML
+          </div>
+          <p className="mt-1 text-sm text-slate-500">
+            {features.length.toLocaleString("es-CL")} poligonos, {attributeKeys.length.toLocaleString("es-CL")} columnas extendidas,{" "}
+            {totalPoints.toLocaleString("es-CL")} puntos.
+          </p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 lg:min-w-[340px]">
+          <button
+            type="button"
+            onClick={onTogglePreview}
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-700 transition hover:bg-white"
+          >
+            {showPreview ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            {showPreview ? "Ocultar tabla" : "Ver tabla"}
+          </button>
+          <button
+            type="button"
+            onClick={onExport}
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+          >
+            <Download className="h-4 w-4" />
+            Exportar KML
+          </button>
+        </div>
+      </div>
+
+      {showPreview && (
+        <div className="mt-4 overflow-hidden rounded-md border border-slate-200">
+          <div className="grid gap-3 border-b border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500 sm:grid-cols-3">
+            <span>Area aprox.: {totalArea.toLocaleString("es-CL", { maximumFractionDigits: 1 })} km2</span>
+            <span>Filas preview: {previewRows.length.toLocaleString("es-CL")}</span>
+            <span>Atributos visibles: {previewAttributes.length.toLocaleString("es-CL")}</span>
+          </div>
+          <div className="max-h-[360px] overflow-auto">
+            <table className="min-w-full divide-y divide-slate-200 text-sm">
+              <thead className="sticky top-0 bg-white text-left text-xs uppercase tracking-[0.08em] text-slate-500">
+                <tr>
+                  <th className="px-3 py-3">Nombre</th>
+                  <th className="px-3 py-3">Codigo</th>
+                  <th className="px-3 py-3">Poligonos</th>
+                  <th className="px-3 py-3">Puntos</th>
+                  <th className="px-3 py-3">Centroide</th>
+                  <th className="px-3 py-3">Area km2</th>
+                  {previewAttributes.map((key) => (
+                    <th key={key} className="px-3 py-3">{key}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {previewRows.map((feature) => (
+                  <tr key={feature.id}>
+                    <td className="max-w-[240px] truncate px-3 py-3 font-semibold">{feature.name}</td>
+                    <td className="px-3 py-3">{feature.code || "Sin codigo"}</td>
+                    <td className="px-3 py-3">{feature.polygonCount.toLocaleString("es-CL")}</td>
+                    <td className="px-3 py-3">{feature.pointCount.toLocaleString("es-CL")}</td>
+                    <td className="whitespace-nowrap px-3 py-3">
+                      {feature.centroidLat !== null && feature.centroidLng !== null
+                        ? `${feature.centroidLat}, ${feature.centroidLng}`
+                        : "Sin dato"}
+                    </td>
+                    <td className="px-3 py-3">{feature.areaKm2?.toLocaleString("es-CL", { maximumFractionDigits: 2 }) ?? "Sin dato"}</td>
+                    {previewAttributes.map((key) => (
+                      <td key={`${feature.id}-${key}`} className="max-w-[220px] truncate px-3 py-3 text-slate-600">
+                        {feature.attributes[key] || ""}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

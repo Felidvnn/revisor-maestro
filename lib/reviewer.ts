@@ -67,6 +67,24 @@ export type ZonePolygon = {
   rings: Array<Array<[number, number]>>;
 };
 
+export type KmlFeatureInfo = {
+  id: string;
+  name: string;
+  code: string;
+  description: string;
+  polygonCount: number;
+  ringCount: number;
+  pointCount: number;
+  minLat: number | null;
+  maxLat: number | null;
+  minLng: number | null;
+  maxLng: number | null;
+  centroidLat: number | null;
+  centroidLng: number | null;
+  areaKm2: number | null;
+  attributes: Record<string, string>;
+};
+
 export type AnalysisMode = "geo" | "days" | "combined";
 export type ReviewStatus = "match" | "mismatch" | "noSchedule" | "noLocation" | "outsideZone" | "noKml";
 export type DayStatus = "match" | "mismatch" | "noSchedule" | "noLocation";
@@ -259,6 +277,49 @@ export function buildReviewWorkbook(records: ReviewRecord[], mode: AnalysisMode)
   return workbook;
 }
 
+export function buildKmlWorkbook(features: KmlFeatureInfo[]) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "Revisor Maestro";
+  const attributeKeys = Array.from(new Set(features.flatMap((feature) => Object.keys(feature.attributes)))).sort((a, b) =>
+    a.localeCompare(b, "es")
+  );
+  const rows = features.map((feature, index) => {
+    const row: Record<string, unknown> = {
+      ORDEN: index + 1,
+      NOMBRE: feature.name,
+      CODIGO_ZONA: feature.code,
+      DESCRIPCION: feature.description,
+      POLIGONOS: feature.polygonCount,
+      ANILLOS: feature.ringCount,
+      PUNTOS: feature.pointCount,
+      LAT_MIN: feature.minLat ?? "",
+      LAT_MAX: feature.maxLat ?? "",
+      LNG_MIN: feature.minLng ?? "",
+      LNG_MAX: feature.maxLng ?? "",
+      CENTROIDE_LAT: feature.centroidLat ?? "",
+      CENTROIDE_LNG: feature.centroidLng ?? "",
+      AREA_KM2_APROX: feature.areaKm2 ?? ""
+    };
+
+    for (const key of attributeKeys) {
+      row[`KML_${safeColumnName(key)}`] = feature.attributes[key] ?? "";
+    }
+    return row;
+  });
+
+  addJsonSheet(workbook, "Resumen", [
+    {
+      POLIGONOS_KML: features.length,
+      COLUMNAS_EXTENDIDAS: attributeKeys.length,
+      PUNTOS_COORDENADAS: features.reduce((sum, feature) => sum + feature.pointCount, 0),
+      AREA_KM2_APROX: roundNumber(features.reduce((sum, feature) => sum + (feature.areaKm2 ?? 0), 0)),
+      GENERADO: new Date().toLocaleString("es-CL")
+    }
+  ]);
+  addJsonSheet(workbook, "KML", rows);
+  return workbook;
+}
+
 export function parseClients(rows: SheetRow[]): ClientRecord[] {
   return rows
     .map((row, index) => {
@@ -296,12 +357,13 @@ export function parseSchedules(rows: SheetRow[]): ZoneSchedule[] {
     const get = rowGetter(row);
     const zoneCode = asText(get(["COD_ZONA_REPARTO", "CODIGO_ZONA_REPARTO", "ZONA"]));
     if (!zoneCode) continue;
+    const zoneKey = zoneCodeKey(zoneCode);
 
     const explicitDays = parseDayCode(asText(get(["DIAS_VISITA", "DIAS_DESPACHO"])));
     const booleanDays = daysFromBooleanColumns(get);
     const expectedDays = explicitDays.length ? explicitDays : booleanDays;
 
-    seen.set(zoneCode, {
+    seen.set(zoneKey, {
       zoneCode,
       zoneName: asText(get(["ZONA_DE_REPARTO", "ZONA REPARTO", "NOMBRE_ZONA"])) || zoneCode,
       expectedDays,
@@ -318,11 +380,12 @@ export function compareClients(
   zones: ZonePolygon[] = [],
   mode: AnalysisMode = "days"
 ): ReviewRecord[] {
-  const schedulesByZone = new Map(schedules.map((schedule) => [schedule.zoneCode, schedule]));
+  const schedulesByZone = new Map(schedules.map((schedule) => [zoneCodeKey(schedule.zoneCode), schedule]));
   const indexedZones = zones.map((zone) => ({ zone, bounds: getZoneBounds(zone) }));
 
   return clients.map((client) => {
-    const schedule = schedulesByZone.get(client.zoneCode);
+    const masterZoneKey = zoneCodeKey(client.zoneCode);
+    const schedule = schedulesByZone.get(masterZoneKey);
     const expectedDays = schedule?.expectedDays ?? [];
     const missingDays = expectedDays.filter((day) => !client.actualDays.includes(day));
     const extraDays = client.actualDays.filter((day) => !expectedDays.includes(day));
@@ -339,7 +402,7 @@ export function compareClients(
     if (!hasLocation) geoStatus = "noLocation";
     else if (!zones.length) geoStatus = "noKml";
     else if (!kmlZone) geoStatus = "outsideZone";
-    else if (kmlZone.code && client.zoneCode && kmlZone.code !== client.zoneCode) geoStatus = "mismatch";
+    else if (kmlZone.code && client.zoneCode && zoneCodeKey(kmlZone.code) !== masterZoneKey) geoStatus = "mismatch";
 
     const status = resolveStatus(dayStatus, geoStatus, mode);
     const issues = buildIssues(
@@ -395,6 +458,47 @@ export function parseKml(kmlText: string): ZonePolygon[] {
     .filter(Boolean) as ZonePolygon[];
 }
 
+export function parseKmlFeatureInfo(kmlText: string): KmlFeatureInfo[] {
+  const parser = new DOMParser();
+  const xml = parser.parseFromString(kmlText, "text/xml");
+  const placemarks = Array.from(xml.getElementsByTagName("Placemark"));
+
+  return placemarks.map((placemark, index) => {
+    const name = cleanName(textFromFirst(placemark, "name") || `Zona ${index + 1}`);
+    const description = textFromFirst(placemark, "description");
+    const polygonNodes = Array.from(placemark.getElementsByTagName("Polygon"));
+    const rings = polygonNodes
+      .flatMap((polygon) => Array.from(polygon.getElementsByTagName("outerBoundaryIs")))
+      .map((outer) => textFromFirst(outer, "coordinates"))
+      .map(parseCoordinates)
+      .filter((ring) => ring.length >= 3);
+    const points = rings.flat();
+    const bounds = boundsFromPoints(points);
+    const centroid = centroidFromPoints(points);
+
+    return {
+      id: `${index}-${name}`,
+      name,
+      code: extractZoneCode(name),
+      description,
+      polygonCount: polygonNodes.length,
+      ringCount: rings.length,
+      pointCount: points.length,
+      minLat: bounds?.minLat ?? null,
+      maxLat: bounds?.maxLat ?? null,
+      minLng: bounds?.minLng ?? null,
+      maxLng: bounds?.maxLng ?? null,
+      centroidLat: centroid?.[0] ?? null,
+      centroidLng: centroid?.[1] ?? null,
+      areaKm2: rings.length ? roundNumber(rings.reduce((sum, ring) => sum + approximateRingAreaKm2(ring), 0)) : null,
+      attributes: {
+        ...extractDescriptionAttributes(description),
+        ...extractKmlAttributes(placemark)
+      }
+    };
+  });
+}
+
 export function findZoneForPoint(lat: number, lng: number, zones: ZonePolygon[]) {
   const indexedZones = zones.map((zone) => ({ zone, bounds: getZoneBounds(zone) }));
   return findContainingZone(lat, lng, indexedZones);
@@ -438,6 +542,12 @@ export function normalizeText(value: unknown) {
     .replace(/[\u0300-\u036f]/g, "")
     .trim()
     .toUpperCase();
+}
+
+export function zoneCodeKey(value: unknown) {
+  const normalized = normalizeText(value).replace(/[^A-Z0-9]/g, "");
+  if (!normalized) return "";
+  return normalized.replace(/^0+(?=\d)/, "");
 }
 
 function rowGetter(row: SheetRow) {
@@ -564,6 +674,90 @@ function extractZoneCode(name: string) {
 
 function cleanName(name: string) {
   return name.replace(/\s+/g, " ").trim();
+}
+
+function extractKmlAttributes(placemark: Element) {
+  const attributes: Record<string, string> = {};
+
+  Array.from(placemark.getElementsByTagName("Data")).forEach((node) => {
+    const key = node.getAttribute("name")?.trim();
+    if (!key) return;
+    attributes[key] = textFromFirst(node, "value");
+  });
+
+  Array.from(placemark.getElementsByTagName("SimpleData")).forEach((node) => {
+    const key = node.getAttribute("name")?.trim();
+    if (!key) return;
+    attributes[key] = node.textContent?.trim() ?? "";
+  });
+
+  return attributes;
+}
+
+function extractDescriptionAttributes(description: string) {
+  const attributes: Record<string, string> = {};
+  const plain = description
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>|<\/div>|<\/li>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+
+  plain.split(/\n+/).forEach((line) => {
+    const [rawKey, ...valueParts] = line.split(":");
+    const key = rawKey?.trim();
+    const value = valueParts.join(":").trim();
+    if (key && value) attributes[key] = value;
+  });
+
+  return attributes;
+}
+
+function safeColumnName(value: string) {
+  const normalized = normalizeText(value).replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return normalized || "DATO";
+}
+
+function roundNumber(value: number) {
+  return Math.round(value * 1000) / 1000;
+}
+
+function boundsFromPoints(points: Array<[number, number]>): Bounds | null {
+  if (!points.length) return null;
+  const lats = points.map(([lat]) => lat);
+  const lngs = points.map(([, lng]) => lng);
+  return {
+    minLat: Math.min(...lats),
+    maxLat: Math.max(...lats),
+    minLng: Math.min(...lngs),
+    maxLng: Math.max(...lngs)
+  };
+}
+
+function centroidFromPoints(points: Array<[number, number]>): [number, number] | null {
+  if (!points.length) return null;
+  const lat = points.reduce((sum, point) => sum + point[0], 0) / points.length;
+  const lng = points.reduce((sum, point) => sum + point[1], 0) / points.length;
+  return [roundNumber(lat), roundNumber(lng)];
+}
+
+function approximateRingAreaKm2(ring: Array<[number, number]>) {
+  if (ring.length < 3) return 0;
+  const meanLat = ring.reduce((sum, point) => sum + point[0], 0) / ring.length;
+  const kmPerLat = 110.574;
+  const kmPerLng = 111.32 * Math.cos((meanLat * Math.PI) / 180);
+  const projected = ring.map(([lat, lng]) => [lng * kmPerLng, lat * kmPerLat]);
+  let area = 0;
+
+  for (let index = 0; index < projected.length; index += 1) {
+    const [x1, y1] = projected[index];
+    const [x2, y2] = projected[(index + 1) % projected.length];
+    area += x1 * y2 - x2 * y1;
+  }
+
+  return Math.abs(area) / 2;
 }
 
 function reviewRow(record: ReviewRecord, mode: AnalysisMode) {
@@ -709,15 +903,7 @@ type Bounds = {
 
 function getZoneBounds(zone: ZonePolygon): Bounds | null {
   const points = zone.rings.flat();
-  if (!points.length) return null;
-  const lats = points.map(([lat]) => lat);
-  const lngs = points.map(([, lng]) => lng);
-  return {
-    minLat: Math.min(...lats),
-    maxLat: Math.max(...lats),
-    minLng: Math.min(...lngs),
-    maxLng: Math.max(...lngs)
-  };
+  return boundsFromPoints(points);
 }
 
 function isPointInBounds(lat: number, lng: number, bounds: Bounds) {
